@@ -17,8 +17,7 @@
     "dumi": "^2.2.13",
     "gh-pages": "^6.1.0",
     "husky": "^8.0.1",
-    "lint-staged": "^13.0.3",
-    "prettier": "^2.7.1"
+    "lint-staged": "^13.0.3"
   },
   "dependencies": {
     "@webav/av-canvas": "file:../packages/av-canvas",
