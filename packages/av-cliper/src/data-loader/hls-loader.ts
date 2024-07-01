@@ -4,7 +4,7 @@ import { EventTool } from '../event-tool';
 
 const DEFAULT_CONCURRENCY = 10;
 
-export type HLSLoader = {
+type HLSLoader = {
   load(
     expectStartTime?: number,
     expectEndTime?: number,
@@ -22,14 +22,11 @@ export type HLSLoader = {
       }[]
     | null;
 };
-export type HLSLoaderConfig = {
+type HLSLoaderConfig = {
   // 并发下载数量
   concurrency?: number;
   // 自定义m4s下载
-  m4sFetch?: (
-    url: string,
-    defaultFetch: (url: string) => Promise<ArrayBuffer>,
-  ) => Promise<ArrayBuffer>;
+  segmentFetch?: (url: string) => Promise<Response>;
 };
 
 /**
@@ -49,12 +46,12 @@ export async function createHLSLoader(
 ): Promise<HLSLoader> {
   // 参数初始化兼容
   let concurrency = DEFAULT_CONCURRENCY;
-  let m4sFetch = null as unknown as HLSLoaderConfig['m4sFetch'];
+  let segmentFetch = null as unknown as HLSLoaderConfig['segmentFetch'];
   if (typeof params === 'number') {
     concurrency = params;
   } else {
     concurrency = params?.concurrency ?? concurrency;
-    m4sFetch = params?.m4sFetch ?? m4sFetch;
+    segmentFetch = params?.segmentFetch ?? segmentFetch;
   }
 
   const parser = new Parser();
@@ -70,7 +67,7 @@ export async function createHLSLoader(
   );
   const base = new URL(m3u8URL, location.href);
 
-  const segmentBufferFetchQueue = {} as Record<string, Promise<ArrayBuffer>>;
+  const segmentBufferFetchQueue = {} as Record<string, Promise<Response>>;
 
   async function downloadSegments(
     segments: Parser['manifest']['segments'],
@@ -80,9 +77,9 @@ export async function createHLSLoader(
     function createTaskQueue(concurrency: number) {
       let running = 0;
       let done = 0;
-      let queue = [] as Array<() => Promise<ArrayBuffer>>;
+      let queue = [] as Array<() => Promise<Response>>;
 
-      async function runTask(task: () => Promise<ArrayBuffer>) {
+      async function runTask(task: () => Promise<Response>) {
         queue.push(task);
         next();
       }
@@ -92,7 +89,12 @@ export async function createHLSLoader(
           const task = queue.shift();
           running++;
           try {
-            await task?.();
+            const res = await task?.();
+            if (!res?.ok) {
+              throw new Error(
+                `fetch segment failed: ${res?.status} ${res?.url}`,
+              );
+            }
             done++;
             evtTool.emit(
               'progress',
@@ -112,22 +114,8 @@ export async function createHLSLoader(
       return runTask;
     }
 
-    async function fetchSegmentBufferPromise(url: string) {
-      try {
-        const defaultFetch = async function (url: string) {
-          const res = await fetch(url);
-          if (res.ok) {
-            return res.arrayBuffer();
-          }
-          throw new Error(`http error status: ${res.status}`);
-        };
-        return m4sFetch
-          ? await m4sFetch(url, defaultFetch)
-          : await defaultFetch(url);
-      } catch (e) {
-        Log.error(url, e);
-        throw e;
-      }
+    async function fetchSegmentResponsePromise(url: string) {
+      return (segmentFetch ?? fetch)(url);
     }
 
     const runTask = createTaskQueue(concurrency);
@@ -135,15 +123,26 @@ export async function createHLSLoader(
     for (const [, item] of segments.entries()) {
       const url = new URL(item.uri, base).href;
       runTask(
-        () => (segmentBufferFetchQueue[url] = fetchSegmentBufferPromise(url)),
+        () => (segmentBufferFetchQueue[url] = fetchSegmentResponsePromise(url)),
       );
     }
   }
 
   async function getSegmentBuffer(url: string) {
-    const segmentBuffer = await segmentBufferFetchQueue[url];
-    delete segmentBufferFetchQueue[url];
-    return segmentBuffer;
+    try {
+      console.log(
+        url,
+        123123123,
+        (await segmentBufferFetchQueue[url]).bodyUsed,
+      );
+      const segmentBuffer = await (
+        await segmentBufferFetchQueue[url]
+      ).arrayBuffer();
+      delete segmentBufferFetchQueue[url];
+      return segmentBuffer;
+    } catch (e) {
+      console.log(url, 123123123, e);
+    }
   }
 
   return {
