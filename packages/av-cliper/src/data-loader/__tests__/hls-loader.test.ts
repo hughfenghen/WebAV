@@ -86,3 +86,15 @@ test('hls loader tells load progress correctly', async () => {
     await clip.ready;
   });
 });
+
+test('hls load uses custom m4s fetch', async () => {
+  const loader = await createHLSLoader(m3u8Url, {
+    m4sFetch: async (url, defaultFetch) => {
+      return await defaultFetch(url);
+    },
+  });
+  const [stream] = loader.load() ?? [];
+  expect(stream.stream).toBeInstanceOf(ReadableStream);
+  const clip = new MP4Clip(stream.stream);
+  await clip.ready;
+});

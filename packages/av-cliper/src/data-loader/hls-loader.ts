@@ -2,10 +2,61 @@ import { Parser } from 'm3u8-parser';
 import { Log } from '../log';
 import { EventTool } from '../event-tool';
 
+const DEFAULT_CONCURRENCY = 10;
+
+export type HLSLoader = {
+  load(
+    expectStartTime?: number,
+    expectEndTime?: number,
+  ):
+    | {
+        actualStartTime: number;
+        actualEndTime: number;
+        on: <Type extends 'progress'>(
+          type: Type,
+          listener: {
+            progress: (progress: number) => void;
+          }[Type],
+        ) => () => void;
+        stream: ReadableStream<Uint8Array>;
+      }[]
+    | null;
+};
+export type HLSLoaderConfig = {
+  // 并发下载数量
+  concurrency?: number;
+  // 自定义m4s下载
+  m4sFetch?: (
+    url: string,
+    defaultFetch: (url: string) => Promise<ArrayBuffer>,
+  ) => Promise<ArrayBuffer>;
+};
+
 /**
  * 创建一个 HLS 资源加载器
  */
-export async function createHLSLoader(m3u8URL: string, concurrency = 10) {
+export async function createHLSLoader(
+  m3u8URL: string,
+  concurrency?: number,
+): Promise<HLSLoader>;
+export async function createHLSLoader(
+  m3u8URL: string,
+  config?: HLSLoaderConfig,
+): Promise<HLSLoader>;
+export async function createHLSLoader(
+  m3u8URL: string,
+  params?: number | HLSLoaderConfig,
+): Promise<HLSLoader> {
+  // 参数初始化兼容
+  let concurrency = DEFAULT_CONCURRENCY;
+  let m4sFetch = null as unknown as HLSLoaderConfig['m4sFetch'];
+  if (typeof params === 'number') {
+    concurrency = params;
+  } else {
+    concurrency = params?.concurrency ?? concurrency;
+    m4sFetch = params?.m4sFetch ?? m4sFetch;
+  }
+
   const parser = new Parser();
   parser.push(await (await fetch(m3u8URL)).text());
   parser.end();
@@ -19,7 +70,7 @@ export async function createHLSLoader(m3u8URL: string, concurrency = 10) {
   );
   const base = new URL(m3u8URL, location.href);
 
-  const segmentBufferFetchqueue = {} as Record<string, Promise<ArrayBuffer>>;
+  const segmentBufferFetchQueue = {} as Record<string, Promise<ArrayBuffer>>;
 
   async function downloadSegments(
     segments: Parser['manifest']['segments'],
@@ -62,7 +113,21 @@ export async function createHLSLoader(m3u8URL: string, concurrency = 10) {
     }
 
     async function fetchSegmentBufferPromise(url: string) {
-      return (await fetch(url)).arrayBuffer();
+      try {
+        const defaultFetch = async function (url: string) {
+          const res = await fetch(url);
+          if (res.ok) {
+            return res.arrayBuffer();
+          }
+          throw new Error(`http error status: ${res.status}`);
+        };
+        return m4sFetch
+          ? await m4sFetch(url, defaultFetch)
+          : await defaultFetch(url);
+      } catch (e) {
+        Log.error(url, e);
+        throw e;
+      }
     }
 
     const runTask = createTaskQueue(concurrency);
@@ -70,14 +135,14 @@ export async function createHLSLoader(m3u8URL: string, concurrency = 10) {
     for (const [, item] of segments.entries()) {
       const url = new URL(item.uri, base).href;
       runTask(
-        () => (segmentBufferFetchqueue[url] = fetchSegmentBufferPromise(url)),
+        () => (segmentBufferFetchQueue[url] = fetchSegmentBufferPromise(url)),
       );
     }
   }
 
   async function getSegmentBuffer(url: string) {
-    const segmentBuffer = await segmentBufferFetchqueue[url];
-    delete segmentBufferFetchqueue[url];
+    const segmentBuffer = await segmentBufferFetchQueue[url];
+    delete segmentBufferFetchQueue[url];
     return segmentBuffer;
   }
 
